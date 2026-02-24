@@ -1,0 +1,17 @@
+[
+  {
+    "agent_id": "market-maker-1",
+    "cash_ticks": 10000000,
+    "positions": { "SIM": 5000 }
+  },
+  {
+    "agent_id": "market-maker-2",
+    "cash_ticks": 10000000,
+    "positions": { "SIM": 5000 }
+  },
+  {
+    "agent_id": "whale-buyer",
+    "cash_ticks": 50000000,
+    "positions": {}
+  }
+]

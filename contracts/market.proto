@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package market;
+
+option go_package = "market-simulator/exchange/gen/market;market";
+
+service ExchangeService {
+  rpc SubmitOrder(SubmitOrderRequest) returns (SubmitOrderResponse);
+  rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse);
+  rpc StreamMarketData(MarketDataRequest) returns (stream MarketDataEvent);
+  rpc StreamTrades(TradeStreamRequest) returns (stream TradeEvent);
+  rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
+  rpc GetPortfolio(GetPortfolioRequest) returns (GetPortfolioResponse);
+}
+
+enum OrderSide {
+  ORDER_SIDE_UNSPECIFIED = 0;
+  ORDER_SIDE_BUY = 1;
+  ORDER_SIDE_SELL = 2;
+}
+
+enum OrderType {
+  ORDER_TYPE_UNSPECIFIED = 0;
+  ORDER_TYPE_LIMIT = 1;
+  ORDER_TYPE_MARKET = 2;
+}
+
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_ACCEPTED = 1;
+  ORDER_STATUS_REJECTED = 2;
+}
+
+enum CancelStatus {
+  CANCEL_STATUS_UNSPECIFIED = 0;
+  CANCEL_STATUS_CANCELED = 1;
+  CANCEL_STATUS_NOT_FOUND = 2;
+  CANCEL_STATUS_REJECTED = 3;
+}
+
+message SubmitOrderRequest {
+  string agent_id = 1;
+  string symbol = 2;
+  OrderSide side = 3;
+  OrderType type = 4;
+  int64 qty = 5;
+  optional int64 price_ticks = 6;
+  int64 client_order_id = 7;
+}
+
+message SubmitOrderResponse {
+  string order_id = 1;
+  OrderStatus status = 2;
+  string reason = 3;
+}
+
+message CancelOrderRequest {
+  string order_id = 1;
+  string agent_id = 2;
+}
+
+message CancelOrderResponse {
+  CancelStatus status = 1;
+  string reason = 2;
+}
+
+message MarketDataRequest {
+  string symbol = 1;
+  bool include_order_book = 2;
+  bool include_candles = 3;
+}
+
+message TradeStreamRequest {
+  string symbol = 1;
+}
+
+message MarketDataEvent {
+  oneof payload {
+    OrderBookUpdate order_book = 1;
+    CandleClosed candle = 2;
+    TickEvent tick = 3;
+  }
+}
+
+message TradeEvent {
+  string trade_id = 1;
+  string symbol = 2;
+  int64 price_ticks = 3;
+  int64 qty = 4;
+  string buy_order_id = 5;
+  string sell_order_id = 6;
+  int64 tick = 7;
+}
+
+message OrderBookUpdate {
+  string symbol = 1;
+  repeated PriceLevel bids = 2;
+  repeated PriceLevel asks = 3;
+}
+
+message PriceLevel {
+  int64 price_ticks = 1;
+  int64 qty = 2;
+}
+
+message CandleClosed {
+  string symbol = 1;
+  int64 interval_ms = 2;
+  int64 start_tick = 3;
+  int64 open = 4;
+  int64 high = 5;
+  int64 low = 6;
+  int64 close = 7;
+  int64 volume = 8;
+}
+
+message TickEvent {
+  int64 tick = 1;
+  int64 server_time_unix_ms = 2;
+}
+
+// ─── portfolio ───────────────────────────────────────────────────────────────
+
+// PositionEntry represents a single symbol position.
+message PositionEntry {
+  string symbol = 1;
+  int64 qty = 2;
+}
+
+// CreateAccountRequest seeds a new agent account.
+// cash_ticks is denominated in the same price-tick units used by orders.
+// Positions can be empty for a cash-only account.
+message CreateAccountRequest {
+  string agent_id = 1;
+  int64 cash_ticks = 2;
+  repeated PositionEntry positions = 3;
+}
+
+message CreateAccountResponse {
+  bool ok = 1;
+  string reason = 2; // non-empty on failure
+}
+
+// GetPortfolioRequest retrieves the live portfolio for an agent.
+message GetPortfolioRequest {
+  string agent_id = 1;
+}
+
+message GetPortfolioResponse {
+  bool found = 1;
+  // cash is the total balance (available + reserved), in price ticks.
+  int64 cash = 2;
+  // reserved_cash is the portion locked for open buy orders.
+  int64 reserved_cash = 3;
+  // positions holds total share counts per symbol (available + reserved).
+  repeated PositionEntry positions = 4;
+  // reserved_shares holds share counts locked for open sell orders.
+  repeated PositionEntry reserved_shares = 5;
+}

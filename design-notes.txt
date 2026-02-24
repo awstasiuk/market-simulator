@@ -1,0 +1,141 @@
+Design Notes - Market Simulator
+
+Context
+- Agents and strategy logic should be written in Python.
+- The exchange must be faster and can be implemented in Go or Rust.
+- Visualization must be graphical (no CLI-only output).
+- Longer-term goal: deploy the exchange so external bots/players can connect.
+- API style/framework: gRPC with Protocol Buffers for the exchange boundary.
+
+Anticipated Directory Structure
+- agents/ (Python agent strategies and base agent interfaces)
+- exchange/ (Go or Rust matching engine)
+- simulator/ (Python tick loop, market data bus, candle builder)
+- contracts/ (shared DTO schemas, versioned; protobuf source files)
+- ui/ (graphical visualization frontend)
+- scripts/ (local run and dev utilities)
+- tests/ (unit and integration tests)
+- docs/ (design and deployment documentation)
+
+Design Guidelines (AI-Implementable)
+- Use a networked exchange API from day one; avoid in-process shortcuts to keep the boundary clean.
+- Prefer gRPC streaming for market data and trade events; unary RPCs for order and cancel.
+- Use a fixed 200ms server tick to drive all state changes.
+- Keep modules small with narrow interfaces and stable DTOs so agents, exchange, and UI can be developed independently.
+- Prefer deterministic behavior where possible (seeded RNG, price ticks, monotonic IDs) to simplify testing.
+
+Architecture Summary
+1) Simulation Kernel (Python)
+- Drives ticks, collects agent orders, sends them to the exchange, publishes results.
+- Owns time progression and configuration (tickMs=200).
+
+2) Exchange / Matching Engine (Go or Rust)
+- Maintains limit order books per symbol.
+- Implements price-time priority matching.
+- Exposes a minimal API surface: submit order, cancel order, match tick.
+- Emits trades and book updates.
+
+3) Agents (Python)
+- Each agent implements onTick(marketData, portfolioState, currentTime) -> Order[].
+- Begin with random traders, expand to market makers, swing traders, and TA-based bots.
+
+4) Market Data Bus (Python first, network later)
+- Publishes tick events, trades, book updates, and candles.
+- Start with in-process pub/sub; evolve to sockets or HTTP/gRPC for remote bots.
+
+5) Candle Builder (Python)
+- Aggregates trades into OHLCV candles (e.g., 1s = 5 ticks).
+- Emits CandleClosed events for the UI.
+
+6) Visualization (Graphical)
+- Subscribe to candle and trade streams.
+- Render candlestick charts in a GUI or web UI.
+
+Deployment Path
+- Phase 1: Networked exchange API from the start; Python agents connect as clients.
+- Phase 2: Harden the API for external bots/players with auth and rate limits.
+
+Data Contracts (Stable DTOs)
+- Order: id, agentId, symbol, side, type, qty, price?, tick
+- Trade: id, symbol, price, qty, buyOrderId, sellOrderId, tick
+- Candle: symbol, intervalMs, startTick, open, high, low, close, volume
+- MarketDataSnapshot: symbol, bestBid, bestAsk, lastTrade, candles[]
+
+Protobuf Schema Outline (gRPC)
+- service ExchangeService
+	- rpc SubmitOrder(SubmitOrderRequest) returns (SubmitOrderResponse)
+	- rpc CancelOrder(CancelOrderRequest) returns (CancelOrderResponse)
+	- rpc StreamMarketData(MarketDataRequest) returns (stream MarketDataEvent)
+	- rpc StreamTrades(TradeStreamRequest) returns (stream TradeEvent)
+
+- message SubmitOrderRequest
+	- string agent_id
+	- string symbol
+	- OrderSide side (BUY, SELL)
+	- OrderType type (LIMIT, MARKET)
+	- int64 qty
+	- int64 price_ticks (optional for MARKET)
+	- int64 client_order_id (optional for client-side tracking)
+
+- message SubmitOrderResponse
+	- string order_id
+	- OrderStatus status (ACCEPTED, REJECTED)
+	- string reason
+
+- message CancelOrderRequest
+	- string order_id
+	- string agent_id
+
+- message CancelOrderResponse
+	- CancelStatus status (CANCELED, NOT_FOUND, REJECTED)
+	- string reason
+
+- message MarketDataRequest
+	- string symbol
+	- bool include_order_book
+	- bool include_candles
+
+- message TradeStreamRequest
+	- string symbol
+
+- message MarketDataEvent
+	- oneof payload
+		- OrderBookUpdate order_book
+		- CandleClosed candle
+		- TickEvent tick
+
+- message TradeEvent
+	- string trade_id
+	- string symbol
+	- int64 price_ticks
+	- int64 qty
+	- string buy_order_id
+	- string sell_order_id
+	- int64 tick
+
+- message OrderBookUpdate
+	- string symbol
+	- repeated PriceLevel bids
+	- repeated PriceLevel asks
+
+- message PriceLevel
+	- int64 price_ticks
+	- int64 qty
+
+- message CandleClosed
+	- string symbol
+	- int64 interval_ms
+	- int64 start_tick
+	- int64 open
+	- int64 high
+	- int64 low
+	- int64 close
+	- int64 volume
+
+- message TickEvent
+	- int64 tick
+	- int64 server_time_unix_ms
+
+Notes
+- Use integer price ticks to avoid floating point errors.
+- Keep order IDs monotonic and deterministic.
