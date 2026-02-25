@@ -1,1 +1,4 @@
 market-env
+
+*.pyc
+__pycache__/

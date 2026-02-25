@@ -7,7 +7,7 @@ import grpc
 
 from agents.gen import market_pb2
 from agents.gen import market_pb2_grpc
-from agents.core.agent import MarketEvent, OrderBookUpdate, PriceLevel
+from agents.core.agent import CandleEvent, MarketEvent, OrderBookUpdate, PriceLevel
 
 
 @dataclass(frozen=True)
@@ -25,7 +25,7 @@ class MarketDataStream:
         self._channel = grpc.insecure_channel(f"{config.host}:{config.port}")
         self._stub = market_pb2_grpc.ExchangeServiceStub(self._channel)
 
-    def events(self) -> Iterator[MarketEvent | OrderBookUpdate]:
+    def events(self) -> Iterator[MarketEvent | OrderBookUpdate | CandleEvent]:
         request = market_pb2.MarketDataRequest(
             symbol=self._config.symbol,
             include_order_book=self._config.include_order_book,
@@ -42,6 +42,18 @@ class MarketDataStream:
                 bids = [PriceLevel(price_ticks=b.price_ticks, qty=b.qty) for b in update.bids]
                 asks = [PriceLevel(price_ticks=a.price_ticks, qty=a.qty) for a in update.asks]
                 yield OrderBookUpdate(symbol=update.symbol, bids=bids, asks=asks)
+            elif payload == "candle":
+                c = event.candle
+                yield CandleEvent(
+                    symbol=c.symbol,
+                    interval_ms=c.interval_ms,
+                    start_tick=c.start_tick,
+                    open=c.open,
+                    high=c.high,
+                    low=c.low,
+                    close=c.close,
+                    volume=c.volume,
+                )
 
     def close(self) -> None:
         self._channel.close()

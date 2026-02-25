@@ -46,7 +46,7 @@ type Trade struct {
 	SellLimitPriceTicks int64 // limit price of the resting/aggressor sell order
 }
 
-// MatchResult is returned by Match.
+// MatchResult is returned by Match, MatchMarketBuy, and MatchMarketSell.
 type MatchResult struct {
 	Trades []Trade
 	// Rested is true when any unfilled quantity was added to the book.
@@ -55,6 +55,12 @@ type MatchResult struct {
 	// that were completely consumed by this match. Callers use this to clean
 	// up server-side indexes (e.g. orderIdx, portfolio reserves).
 	FullyFilledRestingOrderIDs []string
+	// SpentCashTicks is the total cash paid across all fills.
+	// Non-zero only for MatchMarketBuy; for limit orders use trade prices directly.
+	SpentCashTicks int64
+	// UnfilledQty is the share quantity that could not be filled due to
+	// insufficient contra-side liquidity. Set by MatchMarketSell only.
+	UnfilledQty int64
 }
 
 // ─── levelQueue ───────────────────────────────────────────────────────────────
@@ -243,6 +249,47 @@ func (b *Book) SnapshotLevels() (bids []Level, asks []Level) {
 	return b.bids.snapshot(), b.asks.snapshot()
 }
 
+// GetOrder returns the current resting state of an order by ID, including its
+// remaining quantity. Returns false if the order is not in this book.
+func (b *Book) GetOrder(orderID string) (Order, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ref, ok := b.index[orderID]
+	if !ok {
+		return Order{}, false
+	}
+	q := b.sideOf(ref.side).levels[ref.price]
+	if q == nil {
+		return Order{}, false
+	}
+	for i := q.head; i < len(q.orders); i++ {
+		if q.orders[i].ID == orderID {
+			return q.orders[i], true
+		}
+	}
+	return Order{}, false
+}
+
+// MatchMarketBuy executes a market buy by spending up to cashBudget ticks.
+// Fills at best available ask prices; stops when budget is exhausted or the
+// book has no more asks that can be afforded (i.e. price > remaining budget).
+// The order never rests. SpentCashTicks in the result holds the total cash
+// paid; the caller is responsible for refunding the unspent remainder.
+func (b *Book) MatchMarketBuy(agentID, orderID string, cashBudget int64) MatchResult {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.matchMarketBuy(agentID, orderID, cashBudget)
+}
+
+// MatchMarketSell executes a market sell for qty shares at best available bid
+// prices. The order never rests. UnfilledQty in the result holds the share
+// quantity that could not be matched due to insufficient bid liquidity.
+func (b *Book) MatchMarketSell(agentID, orderID string, qty int64) MatchResult {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.matchMarketSell(agentID, orderID, qty)
+}
+
 // ─── internal (book.mu must be held) ──────────────────────────────────────────
 
 func (b *Book) match(order Order) MatchResult {
@@ -361,4 +408,102 @@ func minQty(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// matchMarketBuy sweeps ask levels from best to worst, spending cashBudget.
+// Stops when budget can no longer afford even one share at the current level.
+func (b *Book) matchMarketBuy(agentID, orderID string, cashBudget int64) MatchResult {
+	var trades []Trade
+	var fullyFilled []string
+	spent := int64(0)
+
+	for len(b.asks.prices) > 0 && cashBudget > 0 {
+		price := b.asks.prices[0]
+		canBuy := cashBudget / price // integer: how many shares budget covers at this level
+		if canBuy == 0 {
+			break // cheapest ask is still too expensive for remaining budget
+		}
+		q := b.asks.levels[price]
+		for !q.empty() && canBuy > 0 {
+			resting := q.front()
+			fill := minQty(canBuy, resting.Qty)
+			trades = append(trades, Trade{
+				PriceTicks:          price,
+				Qty:                 fill,
+				BuyOrderID:          orderID,
+				SellOrderID:         resting.ID,
+				BuyAgentID:          agentID,
+				SellAgentID:         resting.AgentID,
+				BuyLimitPriceTicks:  0, // no limit — server uses bulk settlement
+				SellLimitPriceTicks: resting.PriceTicks,
+			})
+			cost := fill * price
+			cashBudget -= cost
+			spent += cost
+			canBuy -= fill
+			resting.Qty -= fill
+			if resting.Qty == 0 {
+				fullyFilled = append(fullyFilled, resting.ID)
+				delete(b.index, resting.ID)
+				q.dequeue()
+			} else {
+				q.updateFront(resting)
+			}
+		}
+		if q.empty() {
+			b.asks.pruneLevel(price)
+		}
+	}
+
+	return MatchResult{
+		Trades:                     trades,
+		Rested:                     false,
+		FullyFilledRestingOrderIDs: fullyFilled,
+		SpentCashTicks:             spent,
+	}
+}
+
+// matchMarketSell sweeps bid levels from best to worst, filling qty shares.
+func (b *Book) matchMarketSell(agentID, orderID string, qty int64) MatchResult {
+	var trades []Trade
+	var fullyFilled []string
+	remaining := qty
+
+	for len(b.bids.prices) > 0 && remaining > 0 {
+		price := b.bids.prices[0]
+		q := b.bids.levels[price]
+		for !q.empty() && remaining > 0 {
+			resting := q.front()
+			fill := minQty(remaining, resting.Qty)
+			trades = append(trades, Trade{
+				PriceTicks:          price,
+				Qty:                 fill,
+				BuyOrderID:          resting.ID,
+				SellOrderID:         orderID,
+				BuyAgentID:          resting.AgentID,
+				SellAgentID:         agentID,
+				BuyLimitPriceTicks:  resting.PriceTicks,
+				SellLimitPriceTicks: 0, // no limit — server settles via ApplySellerFill
+			})
+			remaining -= fill
+			resting.Qty -= fill
+			if resting.Qty == 0 {
+				fullyFilled = append(fullyFilled, resting.ID)
+				delete(b.index, resting.ID)
+				q.dequeue()
+			} else {
+				q.updateFront(resting)
+			}
+		}
+		if q.empty() {
+			b.bids.pruneLevel(price)
+		}
+	}
+
+	return MatchResult{
+		Trades:                     trades,
+		Rested:                     false,
+		FullyFilledRestingOrderIDs: fullyFilled,
+		UnfilledQty:                remaining,
+	}
 }

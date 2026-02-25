@@ -25,6 +25,7 @@ const (
 	ExchangeService_StreamTrades_FullMethodName     = "/market.ExchangeService/StreamTrades"
 	ExchangeService_CreateAccount_FullMethodName    = "/market.ExchangeService/CreateAccount"
 	ExchangeService_GetPortfolio_FullMethodName     = "/market.ExchangeService/GetPortfolio"
+	ExchangeService_ListOrders_FullMethodName       = "/market.ExchangeService/ListOrders"
 )
 
 // ExchangeServiceClient is the client API for ExchangeService service.
@@ -37,6 +38,7 @@ type ExchangeServiceClient interface {
 	StreamTrades(ctx context.Context, in *TradeStreamRequest, opts ...grpc.CallOption) (ExchangeService_StreamTradesClient, error)
 	CreateAccount(ctx context.Context, in *CreateAccountRequest, opts ...grpc.CallOption) (*CreateAccountResponse, error)
 	GetPortfolio(ctx context.Context, in *GetPortfolioRequest, opts ...grpc.CallOption) (*GetPortfolioResponse, error)
+	ListOrders(ctx context.Context, in *ListOrdersRequest, opts ...grpc.CallOption) (*ListOrdersResponse, error)
 }
 
 type exchangeServiceClient struct {
@@ -153,6 +155,16 @@ func (c *exchangeServiceClient) GetPortfolio(ctx context.Context, in *GetPortfol
 	return out, nil
 }
 
+func (c *exchangeServiceClient) ListOrders(ctx context.Context, in *ListOrdersRequest, opts ...grpc.CallOption) (*ListOrdersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListOrdersResponse)
+	err := c.cc.Invoke(ctx, ExchangeService_ListOrders_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExchangeServiceServer is the server API for ExchangeService service.
 // All implementations must embed UnimplementedExchangeServiceServer
 // for forward compatibility
@@ -163,6 +175,7 @@ type ExchangeServiceServer interface {
 	StreamTrades(*TradeStreamRequest, ExchangeService_StreamTradesServer) error
 	CreateAccount(context.Context, *CreateAccountRequest) (*CreateAccountResponse, error)
 	GetPortfolio(context.Context, *GetPortfolioRequest) (*GetPortfolioResponse, error)
+	ListOrders(context.Context, *ListOrdersRequest) (*ListOrdersResponse, error)
 	mustEmbedUnimplementedExchangeServiceServer()
 }
 
@@ -187,6 +200,9 @@ func (UnimplementedExchangeServiceServer) CreateAccount(context.Context, *Create
 }
 func (UnimplementedExchangeServiceServer) GetPortfolio(context.Context, *GetPortfolioRequest) (*GetPortfolioResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetPortfolio not implemented")
+}
+func (UnimplementedExchangeServiceServer) ListOrders(context.Context, *ListOrdersRequest) (*ListOrdersResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListOrders not implemented")
 }
 func (UnimplementedExchangeServiceServer) mustEmbedUnimplementedExchangeServiceServer() {}
 
@@ -315,6 +331,24 @@ func _ExchangeService_GetPortfolio_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExchangeService_ListOrders_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListOrdersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExchangeServiceServer).ListOrders(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExchangeService_ListOrders_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExchangeServiceServer).ListOrders(ctx, req.(*ListOrdersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExchangeService_ServiceDesc is the grpc.ServiceDesc for ExchangeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -337,6 +371,10 @@ var ExchangeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetPortfolio",
 			Handler:    _ExchangeService_GetPortfolio_Handler,
+		},
+		{
+			MethodName: "ListOrders",
+			Handler:    _ExchangeService_ListOrders_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

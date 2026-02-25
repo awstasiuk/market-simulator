@@ -67,7 +67,8 @@ def submit_order(
 
     response = stub.SubmitOrder(request)
     print(
-        f"order_id={response.order_id} status={market_pb2.OrderStatus.Name(response.status)} "
+        f"order_id={response.order_id} client_order_id={response.client_order_id} "
+        f"status={market_pb2.OrderStatus.Name(response.status)} "
         f"reason={response.reason}"
     )
 
@@ -113,6 +114,24 @@ def get_portfolio(
         )
         print(
             f"  {pos.symbol}: total={pos.qty}  reserved={reserved}  available={pos.qty - reserved}"
+        )
+
+
+def list_orders(
+    stub: market_pb2_grpc.ExchangeServiceStub,
+    agent_id: str,
+    symbol: str,
+) -> None:
+    request = market_pb2.ListOrdersRequest(agent_id=agent_id, symbol=symbol)
+    response = stub.ListOrders(request)
+    if not response.orders:
+        print(f"no resting orders for agent_id={agent_id}" + (f" symbol={symbol}" if symbol else ""))
+        return
+    for o in response.orders:
+        side = market_pb2.OrderSide.Name(o.side)
+        print(
+            f"order_id={o.order_id}  symbol={o.symbol}  side={side}  "
+            f"qty={o.qty}  price_ticks={o.price_ticks}"
         )
 
 
@@ -174,6 +193,10 @@ def main() -> int:
     pf_parser = subparsers.add_parser("get-portfolio", help="Print an agent's portfolio")
     pf_parser.add_argument("--agent-id", required=True, help="Agent id")
 
+    lo_parser = subparsers.add_parser("list-orders", help="List resting orders for an agent")
+    lo_parser.add_argument("--agent-id", required=True, help="Agent id")
+    lo_parser.add_argument("--symbol", default="", help="Filter by symbol (optional)")
+
     args = parser.parse_args()
 
     address = f"{args.host}:{args.port}"
@@ -207,6 +230,8 @@ def main() -> int:
             create_account(stub, args.agent_id, args.cash_ticks, positions)
         elif args.command == "get-portfolio":
             get_portfolio(stub, args.agent_id)
+        elif args.command == "list-orders":
+            list_orders(stub, args.agent_id, args.symbol)
     except KeyboardInterrupt:
         print("stopping client")
         time.sleep(0.1)

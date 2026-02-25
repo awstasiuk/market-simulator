@@ -104,3 +104,6 @@ class MarketFollowingTrader:
 
     def on_order_book(self, event: OrderBookUpdate) -> None:
         pass
+
+    def on_candle(self, event: object) -> None:
+        pass

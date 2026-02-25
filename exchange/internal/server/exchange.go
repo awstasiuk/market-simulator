@@ -93,6 +93,11 @@ type ExchangeServer struct {
 	candleMu    sync.Mutex
 	liveCandles map[string]*liveCandle
 
+	// candleHistory stores all closed candles per symbol for replay to new subscribers.
+	// Capped at maxCandleHistory entries per symbol.
+	historyMu     sync.RWMutex
+	candleHistory map[string][]*market.CandleClosed
+
 	// orderIdx maps resting order IDs to their metadata for O(1) cancel routing.
 	orderIdxMu sync.RWMutex
 	orderIdx   map[string]orderMeta
@@ -117,6 +122,7 @@ func NewExchangeServerWithOptions(tickInterval time.Duration, candleTickInterval
 		books:              make(map[string]*orderbook.Book),
 		dirtyBooks:         make(map[string]struct{}),
 		liveCandles:        make(map[string]*liveCandle),
+		candleHistory:      make(map[string][]*market.CandleClosed),
 		orderIdx:           make(map[string]orderMeta),
 		ledger:             portfolio.NewLedger(),
 		marketHub:          newMarketDataHub(),
@@ -139,40 +145,63 @@ func (s *ExchangeServer) SubmitOrder(
 	req *market.SubmitOrderRequest,
 ) (*market.SubmitOrderResponse, error) {
 	if req == nil {
-		return rejectOrder("missing request"), nil
+		return rejectOrder("missing request", 0), nil
 	}
 	if req.AgentId == "" || req.Symbol == "" {
-		return rejectOrder("agent_id and symbol are required"), nil
+		return rejectOrder("agent_id and symbol are required", req.ClientOrderId), nil
 	}
 	if req.Side == market.OrderSide_ORDER_SIDE_UNSPECIFIED ||
-		req.Type == market.OrderType_ORDER_TYPE_UNSPECIFIED ||
-		req.Qty <= 0 {
-		return rejectOrder("side, type, and qty must be valid"), nil
+		req.Type == market.OrderType_ORDER_TYPE_UNSPECIFIED {
+		return rejectOrder("side and type must be valid", req.ClientOrderId), nil
+	}
+	// Market buy uses cash_budget_ticks instead of qty; all other order types need qty > 0.
+	if req.Type != market.OrderType_ORDER_TYPE_MARKET || req.Side != market.OrderSide_ORDER_SIDE_BUY {
+		if req.Qty <= 0 {
+			return rejectOrder("qty must be > 0", req.ClientOrderId), nil
+		}
 	}
 	if req.Type == market.OrderType_ORDER_TYPE_LIMIT && req.PriceTicks == nil {
-		return rejectOrder("price_ticks required for limit order"), nil
+		return rejectOrder("price_ticks required for limit order", req.ClientOrderId), nil
 	}
-	if req.Type != market.OrderType_ORDER_TYPE_LIMIT {
-		return rejectOrder("only limit orders are supported"), nil
+	if req.Type == market.OrderType_ORDER_TYPE_MARKET && req.Side == market.OrderSide_ORDER_SIDE_BUY {
+		if req.CashBudgetTicks == nil || *req.CashBudgetTicks <= 0 {
+			return rejectOrder("cash_budget_ticks required and must be > 0 for market buy", req.ClientOrderId), nil
+		}
+	}
+	if req.Type == market.OrderType_ORDER_TYPE_MARKET && req.Side == market.OrderSide_ORDER_SIDE_SELL {
+		if req.Qty <= 0 {
+			return rejectOrder("qty must be > 0 for market sell", req.ClientOrderId), nil
+		}
 	}
 
-	priceTicks := extractPriceTicks(req)
 	side := toBookSide(req.Side)
+	book := s.getOrCreateBook(req.Symbol)
+	orderID := fmt.Sprintf("o-%d", s.orderSeq.Add(1))
+
+	// ─── market orders ────────────────────────────────────────────────────────
+	if req.Type == market.OrderType_ORDER_TYPE_MARKET {
+		if side == orderbook.SideBuy {
+			return s.submitMarketBuy(req, orderID, book)
+		}
+		return s.submitMarketSell(req, orderID, book)
+	}
+
+	// ─── limit order (original path) ─────────────────────────────────────────
+	priceTicks := extractPriceTicks(req)
 
 	// Reserve outgoing assets before touching the book. Rejects orders that
 	// exceed the agent's available balance, enforcing solvency.
 	switch side {
 	case orderbook.SideBuy:
 		if err := s.ledger.ReserveBuy(req.AgentId, req.Qty, priceTicks); err != nil {
-			return rejectOrder(err.Error()), nil
+			return rejectOrder(err.Error(), req.ClientOrderId), nil
 		}
 	case orderbook.SideSell:
 		if err := s.ledger.ReserveSell(req.AgentId, req.Symbol, req.Qty); err != nil {
-			return rejectOrder(err.Error()), nil
+			return rejectOrder(err.Error(), req.ClientOrderId), nil
 		}
 	}
 
-	orderID := fmt.Sprintf("o-%d", s.orderSeq.Add(1))
 	order := orderbook.Order{
 		ID:         orderID,
 		AgentID:    req.AgentId,
@@ -182,7 +211,6 @@ func (s *ExchangeServer) SubmitOrder(
 		PriceTicks: priceTicks,
 	}
 
-	book := s.getOrCreateBook(req.Symbol)
 	result := book.Match(order) // Book is self-locking; no server-level lock needed.
 
 	if len(result.Trades) > 0 {
@@ -228,9 +256,19 @@ func (s *ExchangeServer) SubmitOrder(
 		s.orderIdxMu.Unlock()
 	}
 
+	// Compute fill totals for the response.
+	var filledQty, costTicks int64
+	for _, t := range result.Trades {
+		filledQty += t.Qty
+		costTicks += t.Qty * t.PriceTicks
+	}
+
 	return &market.SubmitOrderResponse{
-		OrderId: orderID,
-		Status:  market.OrderStatus_ORDER_STATUS_ACCEPTED,
+		OrderId:       orderID,
+		Status:        market.OrderStatus_ORDER_STATUS_ACCEPTED,
+		FilledQty:     filledQty,
+		CostTicks:     costTicks,
+		ClientOrderId: req.ClientOrderId,
 	}, nil
 }
 
@@ -292,6 +330,132 @@ func (s *ExchangeServer) CancelOrder(
 	}, nil
 }
 
+// submitMarketBuy executes a market buy order: sweep asks with a cash budget,
+// settle actual cost, and refund any unspent budget.
+func (s *ExchangeServer) submitMarketBuy(
+	req *market.SubmitOrderRequest,
+	orderID string,
+	book *orderbook.Book,
+) (*market.SubmitOrderResponse, error) {
+	budget := req.GetCashBudgetTicks()
+
+	if err := s.ledger.ReserveCash(req.AgentId, budget); err != nil {
+		return rejectOrder(err.Error(), req.ClientOrderId), nil
+	}
+
+	result := book.MatchMarketBuy(req.AgentId, orderID, budget)
+
+	if len(result.Trades) > 0 {
+		currentTick := s.tickSeq.Load()
+		var totalQty int64
+		for _, trade := range result.Trades {
+			// For market buy the buyer is settled in bulk by SettleMarketBuy below;
+			// only settle the seller side per fill here.
+			s.ledger.ApplySellerFill(trade.SellAgentID, req.Symbol, trade.Qty, trade.PriceTicks)
+			tradeID := fmt.Sprintf("t-%d", s.tradeSeq.Add(1))
+			s.tradeHub.Broadcast(&market.TradeEvent{
+				TradeId:     tradeID,
+				Symbol:      req.Symbol,
+				PriceTicks:  trade.PriceTicks,
+				Qty:         trade.Qty,
+				BuyOrderId:  trade.BuyOrderID,
+				SellOrderId: trade.SellOrderID,
+				Tick:        currentTick,
+			})
+			s.updateCandle(req.Symbol, trade.PriceTicks, trade.Qty)
+			totalQty += trade.Qty
+		}
+		s.markDirty(req.Symbol)
+
+		// Clean up fully filled resting orders from the index.
+		if len(result.FullyFilledRestingOrderIDs) > 0 {
+			s.orderIdxMu.Lock()
+			for _, id := range result.FullyFilledRestingOrderIDs {
+				delete(s.orderIdx, id)
+			}
+			s.orderIdxMu.Unlock()
+		}
+
+		// Atomically release the full reservation and deduct actual cost.
+		s.ledger.SettleMarketBuy(req.AgentId, req.Symbol, totalQty, result.SpentCashTicks, budget)
+
+		return &market.SubmitOrderResponse{
+			OrderId:       orderID,
+			Status:        market.OrderStatus_ORDER_STATUS_ACCEPTED,
+			FilledQty:     totalQty,
+			CostTicks:     result.SpentCashTicks,
+			ClientOrderId: req.ClientOrderId,
+		}, nil
+	}
+
+	// No fills at all — release the full reservation and reject.
+	s.ledger.SettleMarketBuy(req.AgentId, req.Symbol, 0, 0, budget)
+	return rejectOrder("no liquidity: no asks available", req.ClientOrderId), nil
+}
+
+// submitMarketSell executes a market sell order: sweep bids for the requested
+// qty, accept if any fill occurred, and release the reserve for unfilled shares.
+func (s *ExchangeServer) submitMarketSell(
+	req *market.SubmitOrderRequest,
+	orderID string,
+	book *orderbook.Book,
+) (*market.SubmitOrderResponse, error) {
+	if err := s.ledger.ReserveSell(req.AgentId, req.Symbol, req.Qty); err != nil {
+		return rejectOrder(err.Error(), req.ClientOrderId), nil
+	}
+
+	result := book.MatchMarketSell(req.AgentId, orderID, req.Qty)
+
+	if len(result.Trades) == 0 {
+		// Zero liquidity — release full reserve and reject.
+		s.ledger.ReleaseSell(req.AgentId, req.Symbol, req.Qty)
+		return rejectOrder("no liquidity: no bids available", req.ClientOrderId), nil
+	}
+
+	currentTick := s.tickSeq.Load()
+	var cashReceived int64
+	for _, trade := range result.Trades {
+		s.ledger.ApplyBuyerFill(trade.BuyAgentID, req.Symbol, trade.Qty, trade.PriceTicks, trade.BuyLimitPriceTicks)
+		s.ledger.ApplySellerFill(trade.SellAgentID, req.Symbol, trade.Qty, trade.PriceTicks)
+		tradeID := fmt.Sprintf("t-%d", s.tradeSeq.Add(1))
+		s.tradeHub.Broadcast(&market.TradeEvent{
+			TradeId:     tradeID,
+			Symbol:      req.Symbol,
+			PriceTicks:  trade.PriceTicks,
+			Qty:         trade.Qty,
+			BuyOrderId:  trade.BuyOrderID,
+			SellOrderId: trade.SellOrderID,
+			Tick:        currentTick,
+		})
+		s.updateCandle(req.Symbol, trade.PriceTicks, trade.Qty)
+		cashReceived += trade.Qty * trade.PriceTicks
+	}
+	s.markDirty(req.Symbol)
+
+	// Clean up fully filled resting orders from the index.
+	if len(result.FullyFilledRestingOrderIDs) > 0 {
+		s.orderIdxMu.Lock()
+		for _, id := range result.FullyFilledRestingOrderIDs {
+			delete(s.orderIdx, id)
+		}
+		s.orderIdxMu.Unlock()
+	}
+
+	// Release the reserve for shares that were not filled.
+	if result.UnfilledQty > 0 {
+		s.ledger.ReleaseSell(req.AgentId, req.Symbol, result.UnfilledQty)
+	}
+
+	filledQty := req.Qty - result.UnfilledQty
+	return &market.SubmitOrderResponse{
+		OrderId:       orderID,
+		Status:        market.OrderStatus_ORDER_STATUS_ACCEPTED,
+		FilledQty:     filledQty,
+		CostTicks:     cashReceived,
+		ClientOrderId: req.ClientOrderId,
+	}, nil
+}
+
 // ─── account / portfolio RPCs ─────────────────────────────────────────────────
 
 // CreateAccount seeds a new agent account with initial cash and positions.
@@ -342,7 +506,61 @@ func (s *ExchangeServer) GetPortfolio(
 	return resp, nil
 }
 
-// ─── streaming RPCs ───────────────────────────────────────────────────────────
+// ListOrders returns the currently resting limit orders for an agent.
+// If req.Symbol is non-empty, only orders for that symbol are returned.
+func (s *ExchangeServer) ListOrders(
+	_ context.Context,
+	req *market.ListOrdersRequest,
+) (*market.ListOrdersResponse, error) {
+	if req == nil || req.AgentId == "" {
+		return &market.ListOrdersResponse{}, nil
+	}
+
+	// Collect matching order IDs from the index under read lock.
+	type candidate struct {
+		id   string
+		meta orderMeta
+	}
+	var candidates []candidate
+	s.orderIdxMu.RLock()
+	for id, meta := range s.orderIdx {
+		if meta.agentID != req.AgentId {
+			continue
+		}
+		if req.Symbol != "" && meta.symbol != req.Symbol {
+			continue
+		}
+		candidates = append(candidates, candidate{id: id, meta: meta})
+	}
+	s.orderIdxMu.RUnlock()
+
+	// For each candidate, look up its current resting qty in the book.
+	resp := &market.ListOrdersResponse{}
+	for _, c := range candidates {
+		book := s.getBook(c.meta.symbol)
+		if book == nil {
+			continue
+		}
+		order, ok := book.GetOrder(c.id)
+		if !ok {
+			continue
+		}
+		side := market.OrderSide_ORDER_SIDE_BUY
+		if c.meta.side == orderbook.SideSell {
+			side = market.OrderSide_ORDER_SIDE_SELL
+		}
+		resp.Orders = append(resp.Orders, &market.RestingOrder{
+			OrderId:    c.id,
+			Symbol:     c.meta.symbol,
+			Side:       side,
+			Qty:        order.Qty,
+			PriceTicks: c.meta.priceTicks,
+		})
+	}
+	return resp, nil
+}
+
+// ─── streaming RPCs ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 func (s *ExchangeServer) StreamMarketData(
 	req *market.MarketDataRequest,
@@ -352,8 +570,65 @@ func (s *ExchangeServer) StreamMarketData(
 		return fmt.Errorf("missing request")
 	}
 
+	// Subscribe before taking any snapshots so we don't miss events that arrive
+	// between the snapshot read and entering the receive loop.
 	subID, events := s.marketHub.Subscribe()
 	defer s.marketHub.Unsubscribe(subID)
+
+	// ── initial book snapshot ─────────────────────────────────────────────────
+	if req.IncludeOrderBook {
+		s.booksMu.RLock()
+		var symbols []string
+		if req.Symbol != "" {
+			symbols = []string{req.Symbol}
+		} else {
+			for sym := range s.books {
+				symbols = append(symbols, sym)
+			}
+		}
+		s.booksMu.RUnlock()
+		for _, sym := range symbols {
+			book := s.getBook(sym)
+			if book == nil {
+				continue
+			}
+			bids, asks := book.SnapshotLevels()
+			if err := stream.Send(&market.MarketDataEvent{
+				Payload: &market.MarketDataEvent_OrderBook{
+					OrderBook: &market.OrderBookUpdate{
+						Symbol: sym,
+						Bids:   toProtoLevels(bids),
+						Asks:   toProtoLevels(asks),
+					},
+				},
+			}); err != nil {
+				return err
+			}
+		}
+	}
+
+	// ── historical candle replay ──────────────────────────────────────────────
+	if req.IncludeCandles {
+		s.historyMu.RLock()
+		var toReplay []*market.CandleClosed
+		if req.Symbol != "" {
+			hist := s.candleHistory[req.Symbol]
+			toReplay = make([]*market.CandleClosed, len(hist))
+			copy(toReplay, hist)
+		} else {
+			for _, hist := range s.candleHistory {
+				toReplay = append(toReplay, hist...)
+			}
+		}
+		s.historyMu.RUnlock()
+		for _, c := range toReplay {
+			if err := stream.Send(&market.MarketDataEvent{
+				Payload: &market.MarketDataEvent_Candle{Candle: c},
+			}); err != nil {
+				return err
+			}
+		}
+	}
 
 	for {
 		select {
@@ -463,7 +738,12 @@ func (s *ExchangeServer) flushDirtyBooks() {
 	}
 }
 
-// flushCandles closes all live candles that have data and broadcasts CandleClosed.
+// maxCandleHistory is the maximum number of closed candles retained per symbol
+// for replay to newly connecting subscribers.
+const maxCandleHistory = 500
+
+// flushCandles closes all live candles that have data, broadcasts CandleClosed,
+// and appends the result to the per-symbol history buffer.
 func (s *ExchangeServer) flushCandles(tick, intervalMs int64) {
 	s.candleMu.Lock()
 	defer s.candleMu.Unlock()
@@ -478,6 +758,14 @@ func (s *ExchangeServer) flushCandles(tick, intervalMs int64) {
 				Candle: closed,
 			},
 		})
+		// Append to history, capping at maxCandleHistory entries.
+		s.historyMu.Lock()
+		hist := append(s.candleHistory[symbol], closed)
+		if len(hist) > maxCandleHistory {
+			hist = hist[len(hist)-maxCandleHistory:]
+		}
+		s.candleHistory[symbol] = hist
+		s.historyMu.Unlock()
 		// Reset for next period.
 		c.startTick = tick + 1
 		s.liveCandles[symbol] = c
@@ -531,22 +819,20 @@ func (s *ExchangeServer) getBook(symbol string) *orderbook.Book {
 	return s.books[symbol]
 }
 
-func rejectOrder(reason string) *market.SubmitOrderResponse {
+func rejectOrder(reason string, clientOrderID int64) *market.SubmitOrderResponse {
 	return &market.SubmitOrderResponse{
-		Status: market.OrderStatus_ORDER_STATUS_REJECTED,
-		Reason: reason,
+		Status:        market.OrderStatus_ORDER_STATUS_REJECTED,
+		Reason:        reason,
+		ClientOrderId: clientOrderID,
 	}
 }
 
 func shouldSendMarketEvent(req *market.MarketDataRequest, event *market.MarketDataEvent) bool {
 	switch payload := event.Payload.(type) {
 	case *market.MarketDataEvent_Tick:
-		// Ticks are global; filter by symbol if requested.
-		if req.Symbol == "" {
-			return true
-		}
+		// TickEvent is a global heartbeat with no symbol field; always forward.
 		_ = payload
-		return true // tick events carry no symbol — always forward
+		return true
 	case *market.MarketDataEvent_OrderBook:
 		if !req.IncludeOrderBook {
 			return false

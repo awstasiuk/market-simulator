@@ -1,6 +1,7 @@
 package server
 
 import (
+	"log"
 	"sync"
 	"sync/atomic"
 
@@ -41,14 +42,30 @@ func (h *marketDataHub) Unsubscribe(id int64) {
 }
 
 func (h *marketDataHub) Broadcast(event *market.MarketDataEvent) {
+	var lagging []int64
+
 	h.mu.RLock()
-	for _, ch := range h.subs {
+	for id, ch := range h.subs {
 		select {
 		case ch <- event:
 		default:
+			lagging = append(lagging, id)
 		}
 	}
 	h.mu.RUnlock()
+
+	if len(lagging) == 0 {
+		return
+	}
+	h.mu.Lock()
+	for _, id := range lagging {
+		if ch, ok := h.subs[id]; ok {
+			delete(h.subs, id)
+			close(ch)
+			log.Printf("marketDataHub: disconnected lagging subscriber %d (channel full)", id)
+		}
+	}
+	h.mu.Unlock()
 }
 
 type tradeHub struct {
@@ -85,12 +102,28 @@ func (h *tradeHub) Unsubscribe(id int64) {
 }
 
 func (h *tradeHub) Broadcast(event *market.TradeEvent) {
+	var lagging []int64
+
 	h.mu.RLock()
-	for _, ch := range h.subs {
+	for id, ch := range h.subs {
 		select {
 		case ch <- event:
 		default:
+			lagging = append(lagging, id)
 		}
 	}
 	h.mu.RUnlock()
+
+	if len(lagging) == 0 {
+		return
+	}
+	h.mu.Lock()
+	for _, id := range lagging {
+		if ch, ok := h.subs[id]; ok {
+			delete(h.subs, id)
+			close(ch)
+			log.Printf("tradeHub: disconnected lagging subscriber %d (channel full)", id)
+		}
+	}
+	h.mu.Unlock()
 }

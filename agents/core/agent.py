@@ -22,6 +22,18 @@ class TradeEvent:
 
 
 @dataclass(frozen=True)
+class CandleEvent:
+    symbol: str
+    interval_ms: int
+    start_tick: int
+    open: int
+    high: int
+    low: int
+    close: int
+    volume: int
+
+
+@dataclass(frozen=True)
 class PriceLevel:
     price_ticks: int
     qty: int
@@ -41,6 +53,9 @@ class OrderIntent:
     order_type: str
     qty: int
     price_ticks: int | None = None
+    # client_order_id is echoed back in SubmitOrderResponse so each agent can
+    # correlate a response to its own internal order without inspecting order_id.
+    client_order_id: int = 0
 
 
 class Agent(Protocol):
@@ -53,4 +68,7 @@ class Agent(Protocol):
         ...
 
     def on_order_book(self, event: OrderBookUpdate) -> None:
+        ...
+
+    def on_candle(self, event: CandleEvent) -> None:
         ...

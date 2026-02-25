@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from typing import Iterable
 
-from agents.core.agent import Agent, MarketEvent, OrderIntent, OrderBookUpdate, TradeEvent
+from agents.core.agent import Agent, CandleEvent, MarketEvent, OrderIntent, OrderBookUpdate, TradeEvent
 from agents.core.market_data import MarketDataConfig, MarketDataStream, stream_trades
 from agents.gen import market_pb2
 from agents.gen import market_pb2_grpc
@@ -49,6 +49,8 @@ class AgentRunner:
                     self._handle_tick(event)
                 elif isinstance(event, OrderBookUpdate):
                     self._handle_order_book(event)
+                elif isinstance(event, CandleEvent):
+                    self._handle_candle(event)
         finally:
             market_stream.close()
             self._channel.close()
@@ -65,6 +67,10 @@ class AgentRunner:
         for agent in self._agents:
             agent.on_order_book(event)
 
+    def _handle_candle(self, event: CandleEvent) -> None:
+        for agent in self._agents:
+            agent.on_candle(event)
+
     def _submit_order(self, agent_id: str, intent: OrderIntent) -> None:
         side_enum = market_pb2.OrderSide.Value(f"ORDER_SIDE_{intent.side}")
         type_enum = market_pb2.OrderType.Value(f"ORDER_TYPE_{intent.order_type}")
@@ -75,6 +81,7 @@ class AgentRunner:
             side=side_enum,
             type=type_enum,
             qty=intent.qty,
+            client_order_id=intent.client_order_id,
         )
 
         if intent.price_ticks is not None:

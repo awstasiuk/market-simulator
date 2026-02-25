@@ -2,7 +2,7 @@
 """Client and server classes corresponding to protobuf-defined services."""
 import grpc
 
-from . import market_pb2 as market__pb2
+import market_pb2 as market__pb2
 
 
 class ExchangeServiceStub(object):
@@ -43,6 +43,11 @@ class ExchangeServiceStub(object):
                 '/market.ExchangeService/GetPortfolio',
                 request_serializer=market__pb2.GetPortfolioRequest.SerializeToString,
                 response_deserializer=market__pb2.GetPortfolioResponse.FromString,
+                )
+        self.ListOrders = channel.unary_unary(
+                '/market.ExchangeService/ListOrders',
+                request_serializer=market__pb2.ListOrdersRequest.SerializeToString,
+                response_deserializer=market__pb2.ListOrdersResponse.FromString,
                 )
 
 
@@ -85,6 +90,12 @@ class ExchangeServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def ListOrders(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_ExchangeServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -118,7 +129,136 @@ def add_ExchangeServiceServicer_to_server(servicer, server):
                     request_deserializer=market__pb2.GetPortfolioRequest.FromString,
                     response_serializer=market__pb2.GetPortfolioResponse.SerializeToString,
             ),
+            'ListOrders': grpc.unary_unary_rpc_method_handler(
+                    servicer.ListOrders,
+                    request_deserializer=market__pb2.ListOrdersRequest.FromString,
+                    response_serializer=market__pb2.ListOrdersResponse.SerializeToString,
+            ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
             'market.ExchangeService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
+
+
+ # This class is part of an EXPERIMENTAL API.
+class ExchangeService(object):
+    """Missing associated documentation comment in .proto file."""
+
+    @staticmethod
+    def SubmitOrder(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/market.ExchangeService/SubmitOrder',
+            market__pb2.SubmitOrderRequest.SerializeToString,
+            market__pb2.SubmitOrderResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def CancelOrder(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/market.ExchangeService/CancelOrder',
+            market__pb2.CancelOrderRequest.SerializeToString,
+            market__pb2.CancelOrderResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def StreamMarketData(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(request, target, '/market.ExchangeService/StreamMarketData',
+            market__pb2.MarketDataRequest.SerializeToString,
+            market__pb2.MarketDataEvent.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def StreamTrades(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_stream(request, target, '/market.ExchangeService/StreamTrades',
+            market__pb2.TradeStreamRequest.SerializeToString,
+            market__pb2.TradeEvent.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def CreateAccount(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/market.ExchangeService/CreateAccount',
+            market__pb2.CreateAccountRequest.SerializeToString,
+            market__pb2.CreateAccountResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def GetPortfolio(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/market.ExchangeService/GetPortfolio',
+            market__pb2.GetPortfolioRequest.SerializeToString,
+            market__pb2.GetPortfolioResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def ListOrders(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/market.ExchangeService/ListOrders',
+            market__pb2.ListOrdersRequest.SerializeToString,
+            market__pb2.ListOrdersResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)

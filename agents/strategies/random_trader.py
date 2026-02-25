@@ -44,3 +44,6 @@ class RandomTrader:
 
     def on_order_book(self, event: OrderBookUpdate) -> None:
         return None
+
+    def on_candle(self, event: object) -> None:
+        return None

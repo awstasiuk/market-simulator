@@ -11,6 +11,7 @@ service ExchangeService {
   rpc StreamTrades(TradeStreamRequest) returns (stream TradeEvent);
   rpc CreateAccount(CreateAccountRequest) returns (CreateAccountResponse);
   rpc GetPortfolio(GetPortfolioRequest) returns (GetPortfolioResponse);
+  rpc ListOrders(ListOrdersRequest) returns (ListOrdersResponse);
 }
 
 enum OrderSide {
@@ -43,15 +44,27 @@ message SubmitOrderRequest {
   string symbol = 2;
   OrderSide side = 3;
   OrderType type = 4;
+  // qty is the share count for limit orders and market sell orders.
   int64 qty = 5;
+  // price_ticks is required for limit orders; ignored for market orders.
   optional int64 price_ticks = 6;
   int64 client_order_id = 7;
+  // cash_budget_ticks is the total cash to spend for a market buy order.
+  // The unfilled remainder is refunded. Ignored for all other order types.
+  optional int64 cash_budget_ticks = 8;
 }
 
 message SubmitOrderResponse {
   string order_id = 1;
   OrderStatus status = 2;
   string reason = 3;
+  // filled_qty is the number of shares executed (set for both limit and market).
+  int64 filled_qty = 4;
+  // cost_ticks is the total cash paid (buy) or received (sell) across all fills.
+  int64 cost_ticks = 5;
+  // client_order_id is echoed from the request so agents can correlate responses
+  // to their own internal order tracking without inspecting order_id.
+  int64 client_order_id = 6;
 }
 
 message CancelOrderRequest {
@@ -156,4 +169,26 @@ message GetPortfolioResponse {
   repeated PositionEntry positions = 4;
   // reserved_shares holds share counts locked for open sell orders.
   repeated PositionEntry reserved_shares = 5;
+}
+
+// ─── orders ───────────────────────────────────────────────────────────────────
+
+// ListOrdersRequest queries resting orders for an agent.
+// If symbol is empty, orders across all symbols are returned.
+message ListOrdersRequest {
+  string agent_id = 1;
+  string symbol = 2; // optional filter
+}
+
+// RestingOrder describes a single limit order currently resting in the book.
+message RestingOrder {
+  string order_id = 1;
+  string symbol = 2;
+  OrderSide side = 3;
+  int64 qty = 4;       // current remaining quantity
+  int64 price_ticks = 5;
+}
+
+message ListOrdersResponse {
+  repeated RestingOrder orders = 1;
 }

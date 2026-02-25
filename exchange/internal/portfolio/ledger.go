@@ -186,6 +186,45 @@ func (l *Ledger) ReleaseSell(agentID, symbol string, cancelledQty int64) {
 	}
 }
 
+// ReserveCash locks a lump-sum cash amount for a market buy order where the
+// per-share price is not known in advance. Call SettleMarketBuy afterward to
+// atomically deduct the actual cost and release the unused reservation.
+func (l *Ledger) ReserveCash(agentID string, cashTicks int64) error {
+	sh := l.shardOf(agentID)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	a := sh.getOrCreate(agentID)
+	if a.availableCash() < cashTicks {
+		return fmt.Errorf("insufficient cash: need %d ticks, available %d", cashTicks, a.availableCash())
+	}
+	a.reservedCash += cashTicks
+	return nil
+}
+
+// SettleMarketBuy atomically closes out a market buy order:
+//   - releases the full budget reservation (reserveBudgetTicks)
+//   - deducts the actual cash spent (totalCostTicks)
+//   - credits the received shares
+//
+// The net effect on available cash is: (reserveBudgetTicks - totalCostTicks)
+// which equals the refund. Call this once after all fills are known.
+func (l *Ledger) SettleMarketBuy(agentID, symbol string, qty, totalCostTicks, reserveBudgetTicks int64) {
+	sh := l.shardOf(agentID)
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
+
+	a := sh.getOrCreate(agentID)
+	a.reservedCash -= reserveBudgetTicks
+	if a.reservedCash < 0 {
+		a.reservedCash = 0
+	}
+	a.cash -= totalCostTicks
+	if qty > 0 {
+		a.positions[symbol] += qty
+	}
+}
+
 // ─── fill settlement ──────────────────────────────────────────────────────────
 
 // ApplyBuyerFill settles one fill for the buyer:
